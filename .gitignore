@@ -1,6 +1,9 @@
 .venv/
+.venv-streamlit/
 venv/
+.agents/
 .env
+.streamlit/secrets.toml
 __pycache__/
 *.pyc
 .DS_Store
