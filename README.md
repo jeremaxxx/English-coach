@@ -1,9 +1,9 @@
 # English Coach
 
-Application web locale pour pratiquer l'anglais professionnel de niveau B2.
-Elle propose 30 exercices sur les entretiens, le conseil, la banque, la data et
-les situations de Business Manager. Les réponses restent sur votre ordinateur :
-aucune API d'intelligence artificielle n'est appelée.
+Application web pour pratiquer l'anglais professionnel de niveau B2 et la
+conjugaison anglaise et espagnole. Elle propose 30 exercices professionnels,
+12 fiches de cours sur les temps principaux et 24 exercices de conjugaison avec
+correction immédiate. Aucune API d'intelligence artificielle n'est appelée.
 
 ## Prérequis
 
@@ -41,8 +41,9 @@ python -m unittest discover -s tests -v
 
 ## Organisation
 
-- `app.py` : interface Streamlit, filtres et état de la session ;
+- `app.py` : interface Streamlit, navigation et état de la session ;
 - `coach.py` : normalisation, comparaison et score via `get_feedback()` ;
+- `conjugation.py` : cours, exercices et correction de conjugaison bilingues ;
 - `exercises.json` : 30 exercices d'anglais professionnel ;
 - `tests/test_coach.py` : tests unitaires du moteur de correction ;
 - `.streamlit/config.toml` : couleurs et configuration locale de l'interface ;

@@ -3,6 +3,7 @@
 import unittest
 
 from coach import get_feedback, normalize_answer
+from conjugation import exercises_for, is_conjugation_correct, normalize_conjugation_answer
 
 
 class NormalizeAnswerTests(unittest.TestCase):
@@ -35,6 +36,22 @@ class GetFeedbackTests(unittest.TestCase):
         feedback = get_feedback("I manage a team.", "I managed a team.")
         self.assertGreater(feedback["score"], 0)
         self.assertLess(feedback["score"], 100)
+
+
+class ConjugationTests(unittest.TestCase):
+    def test_accepts_case_and_spacing_differences(self) -> None:
+        self.assertTrue(is_conjugation_correct("  HAD   RESOLVED ", ["had resolved"]))
+
+    def test_preserves_spanish_accents(self) -> None:
+        self.assertEqual(normalize_conjugation_answer("HABLÉ!"), "hablé")
+        self.assertFalse(is_conjugation_correct("hable", ["hablé"]))
+
+    def test_rejects_empty_answer(self) -> None:
+        self.assertFalse(is_conjugation_correct("  ", ["worked"]))
+
+    def test_each_tense_has_exercises(self) -> None:
+        self.assertEqual(len(exercises_for("English", "Past simple")), 2)
+        self.assertEqual(len(exercises_for("Español", "Pretérito imperfecto")), 2)
 
 
 if __name__ == "__main__":
