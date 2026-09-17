@@ -1,9 +1,16 @@
 # English Coach
 
-Application web pour pratiquer l'anglais professionnel de niveau B2 et la
-conjugaison anglaise et espagnole. Elle propose 30 exercices professionnels,
-12 fiches de cours sur les temps principaux et 24 exercices de conjugaison avec
-correction immédiate. Aucune API d'intelligence artificielle n'est appelée.
+Application web pour pratiquer l'anglais professionnel, l'anglais général et
+l'espagnol. Elle réunit quatre espaces pédagogiques :
+
+- 20 fiches de conjugaison anglaise et espagnole, avec plus de 80 exercices ;
+- un répertoire de plus de 100 verbes irréguliers et un quiz de mémorisation ;
+- 80 expressions de vocabulaire trilingue sur le travail, l'humanitaire et la
+  vie quotidienne, consultables ou utilisables en quiz ;
+- 30 exercices historiques d'anglais professionnel de niveau B2.
+
+Aucune API d'intelligence artificielle n'est appelée : le contenu et la
+correction fonctionnent localement.
 
 ## Prérequis
 
@@ -44,6 +51,8 @@ python -m unittest discover -s tests -v
 - `app.py` : interface Streamlit, navigation et état de la session ;
 - `coach.py` : normalisation, comparaison et score via `get_feedback()` ;
 - `conjugation.py` : cours, exercices et correction de conjugaison bilingues ;
+- `irregular_verbs.py` : formes essentielles des verbes irréguliers ;
+- `vocabulary.py` : lexique trilingue professionnel, humanitaire et quotidien ;
 - `exercises.json` : 30 exercices d'anglais professionnel ;
 - `tests/test_coach.py` : tests unitaires du moteur de correction ;
 - `.streamlit/config.toml` : couleurs et configuration locale de l'interface ;

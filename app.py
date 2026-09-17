@@ -7,7 +7,9 @@ from typing import Dict, List
 import streamlit as st
 
 from coach import Feedback, get_feedback
-from conjugation import LESSONS, exercises_for, is_conjugation_correct
+from conjugation import LESSON_DETAILS, LESSONS, exercises_for, is_conjugation_correct
+from irregular_verbs import irregulars_for
+from vocabulary import VOCABULARY, vocabulary_for
 
 
 EXERCISES_FILE = Path(__file__).with_name("exercises.json")
@@ -163,6 +165,17 @@ def show_conjugation_lesson(language: str, tense: str) -> None:
     for example in lesson["examples"]:
         st.markdown("- {0}".format(example))
     st.info(lesson["tip"], icon=":material/lightbulb:")
+    details = LESSON_DETAILS[language][tense]
+    with st.expander(
+        "Go further" if language == "English" else "Profundizar",
+        icon=":material/school:",
+    ):
+        st.markdown("**Signal words**" if language == "English" else "**Marcadores**")
+        st.write(details["signals"])
+        st.markdown("**Common mistake**" if language == "English" else "**Error frecuente**")
+        st.write(details["pitfall"])
+        st.markdown("**Key contrast**" if language == "English" else "**Contraste clave**")
+        st.write(details["contrast"])
 
 
 def show_conjugation_practice(language: str, tense: str) -> None:
@@ -256,6 +269,195 @@ def show_conjugation() -> None:
         show_conjugation_practice(language, tense)
 
 
+def split_accepted_answers(value: str) -> List[str]:
+    """Transforme une cellule contenant plusieurs variantes en réponses."""
+
+    answers = [item.strip() for item in value.split(" / ")]
+    return answers + [value]
+
+
+def reset_quiz(prefix: str, signature: str) -> None:
+    """Initialise l'état partagé par les quiz simples."""
+
+    st.session_state["{0}_signature".format(prefix)] = signature
+    st.session_state["{0}_index".format(prefix)] = 0
+    st.session_state["{0}_score".format(prefix)] = 0
+    st.session_state["{0}_answered".format(prefix)] = False
+    st.session_state["{0}_answer".format(prefix)] = ""
+
+
+def show_irregular_directory(language: str) -> None:
+    """Affiche un répertoire filtrable des formes irrégulières."""
+
+    rows = irregulars_for(language)
+    search = st.text_input(
+        "Search a verb or meaning" if language == "English"
+        else "Buscar un verbo o significado",
+        placeholder="write, écrire…" if language == "English" else "hacer, faire…",
+    ).casefold().strip()
+    if search:
+        rows = [row for row in rows if any(search in value.casefold() for value in row.values())]
+    st.caption("{0} verbs".format(len(rows)))
+    st.dataframe(rows, hide_index=True, width="stretch")
+
+
+def show_irregular_quiz(language: str) -> None:
+    """Demande une forme irrégulière et donne une correction immédiate."""
+
+    rows = irregulars_for(language)
+    fields = (["Past simple", "Past participle"] if language == "English"
+              else ["Presente (yo)", "Indefinido (yo)", "Participio", "Futuro (yo)"])
+    signature = language
+    if st.session_state.get("irregular_signature") != signature:
+        reset_quiz("irregular", signature)
+    index = st.session_state.irregular_index
+    if index >= len(rows):
+        st.success("Complete! Score: {0}/{1}.".format(st.session_state.irregular_score, len(rows)))
+        if st.button("Start again", type="primary", width="stretch", key="irregular_restart"):
+            reset_quiz("irregular", signature)
+            st.rerun()
+        return
+
+    row = rows[index]
+    field = fields[index % len(fields)]
+    infinitive_key = "Infinitive" if language == "English" else "Infinitivo"
+    expected = row[field]
+    st.progress(index / len(rows), text="Verb {0} of {1}".format(index + 1, len(rows)))
+    with st.container(border=True):
+        st.caption(row["Français"])
+        st.subheader(row[infinitive_key])
+        st.write("Form requested: **{0}**".format(field))
+    if not st.session_state.irregular_answered:
+        with st.form("irregular_form"):
+            answer = st.text_input("Your answer" if language == "English" else "Tu respuesta")
+            submitted = st.form_submit_button("Check", type="primary", width="stretch")
+        if submitted:
+            correct = is_conjugation_correct(answer, split_accepted_answers(expected))
+            st.session_state.irregular_answered = True
+            st.session_state.irregular_answer = answer
+            st.session_state.irregular_correct = correct
+            if correct:
+                st.session_state.irregular_score += 1
+            st.rerun()
+    else:
+        if st.session_state.irregular_correct:
+            st.success("Correct!", icon=":material/check_circle:")
+        else:
+            st.error("Correct form: **{0}**".format(expected), icon=":material/cancel:")
+        if st.button("Next verb", type="primary", width="stretch", key="irregular_next"):
+            st.session_state.irregular_index += 1
+            st.session_state.irregular_answered = False
+            st.rerun()
+
+
+def show_irregular_verbs() -> None:
+    """Affiche l'espace de référence et d'entraînement des irréguliers."""
+
+    st.title("Irregular verbs")
+    st.caption("Study the essential forms, then retrieve them from memory.")
+    language = st.sidebar.segmented_control(
+        "Language", ["English", "Español"], default="English", required=True,
+        width="stretch", key="irregular_language",
+    )
+    section = st.segmented_control(
+        "Mode", ["Reference", "Quiz"], default="Reference", required=True,
+        width="stretch", key="irregular_section",
+    )
+    if section == "Reference":
+        show_irregular_directory(language)
+    else:
+        show_irregular_quiz(language)
+
+
+def show_vocabulary_reference(language: str, categories: List[str]) -> None:
+    """Affiche le lexique trilingue sélectionné."""
+
+    rows = vocabulary_for(language, categories)
+    search = st.text_input("Search the vocabulary", placeholder="beneficiary, presupuesto…").casefold().strip()
+    if search:
+        rows = [row for row in rows if any(search in str(value).casefold() for value in row.values())]
+    display_rows = [
+        {"Theme": row["category"], "Français": row["Français"], language: row[language]}
+        for row in rows
+    ]
+    st.caption("{0} expressions".format(len(display_rows)))
+    st.dataframe(display_rows, hide_index=True, width="stretch")
+
+
+def show_vocabulary_quiz(language: str, categories: List[str], direction: str) -> None:
+    """Fait traduire le vocabulaire choisi dans les deux directions."""
+
+    rows = vocabulary_for(language, categories)
+    signature = "|".join([language, direction] + categories)
+    if st.session_state.get("vocabulary_signature") != signature:
+        reset_quiz("vocabulary", signature)
+    index = st.session_state.vocabulary_index
+    if index >= len(rows):
+        st.success("Complete! Score: {0}/{1}.".format(st.session_state.vocabulary_score, len(rows)))
+        if st.button("Start again", type="primary", width="stretch", key="vocabulary_restart"):
+            reset_quiz("vocabulary", signature)
+            st.rerun()
+        return
+    row = rows[index]
+    source = "Français" if direction == "French → target language" else language
+    target = language if source == "Français" else "Français"
+    expected = row[target]
+    st.progress(index / len(rows), text="Word {0} of {1}".format(index + 1, len(rows)))
+    with st.container(border=True):
+        st.caption("{0} · translate into {1}".format(row["category"], target))
+        st.subheader(row[source])
+    if not st.session_state.vocabulary_answered:
+        with st.form("vocabulary_form"):
+            answer = st.text_input("Translation")
+            submitted = st.form_submit_button("Check", type="primary", width="stretch")
+        if submitted:
+            correct = is_conjugation_correct(answer, split_accepted_answers(expected))
+            st.session_state.vocabulary_answered = True
+            st.session_state.vocabulary_answer = answer
+            st.session_state.vocabulary_correct = correct
+            if correct:
+                st.session_state.vocabulary_score += 1
+            st.rerun()
+    else:
+        if st.session_state.vocabulary_correct:
+            st.success("Correct!", icon=":material/check_circle:")
+        else:
+            st.error("Expected answer: **{0}**".format(expected), icon=":material/cancel:")
+        if st.button("Next word", type="primary", width="stretch", key="vocabulary_next"):
+            st.session_state.vocabulary_index += 1
+            st.session_state.vocabulary_answered = False
+            st.rerun()
+
+
+def show_vocabulary() -> None:
+    """Affiche le lexique professionnel et quotidien avec quiz."""
+
+    st.title("Vocabulary")
+    st.caption("Work, humanitarian aid and everyday life—in English and Spanish.")
+    language = st.sidebar.segmented_control(
+        "Target language", ["English", "Español"], default="English", required=True,
+        width="stretch", key="vocabulary_language",
+    )
+    all_categories = list(dict.fromkeys(row["category"] for row in VOCABULARY))
+    categories = st.sidebar.multiselect(
+        "Themes", all_categories, default=all_categories, key="vocabulary_categories",
+    )
+    if not categories:
+        st.warning("Select at least one theme.")
+        return
+    section = st.segmented_control(
+        "Mode", ["Reference", "Quiz"], default="Reference", required=True,
+        width="stretch", key="vocabulary_section",
+    )
+    if section == "Reference":
+        show_vocabulary_reference(language, categories)
+    else:
+        direction = st.selectbox(
+            "Direction", ["French → target language", "Target language → French"]
+        )
+        show_vocabulary_quiz(language, categories, direction)
+
+
 def main() -> None:
     """Construit et exécute l'application Streamlit."""
 
@@ -273,12 +475,17 @@ def main() -> None:
         unsafe_allow_html=True,
     )
     mode = st.sidebar.segmented_control(
-        "Practice area", ["Conjugation", "Professional English"],
+        "Practice area", ["Conjugation", "Irregular verbs", "Vocabulary", "Professional English"],
         default="Conjugation", required=True, width="stretch", key="practice_area",
+        wrap=True,
     )
     st.sidebar.divider()
     if mode == "Conjugation":
         show_conjugation()
+    elif mode == "Irregular verbs":
+        show_irregular_verbs()
+    elif mode == "Vocabulary":
+        show_vocabulary()
     else:
         show_professional_practice()
 

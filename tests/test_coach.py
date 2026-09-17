@@ -3,7 +3,9 @@
 import unittest
 
 from coach import get_feedback, normalize_answer
-from conjugation import exercises_for, is_conjugation_correct, normalize_conjugation_answer
+from conjugation import EXERCISES, LESSONS, exercises_for, is_conjugation_correct, normalize_conjugation_answer
+from irregular_verbs import irregulars_for
+from vocabulary import VOCABULARY, vocabulary_for
 
 
 class NormalizeAnswerTests(unittest.TestCase):
@@ -50,8 +52,25 @@ class ConjugationTests(unittest.TestCase):
         self.assertFalse(is_conjugation_correct("  ", ["worked"]))
 
     def test_each_tense_has_exercises(self) -> None:
-        self.assertEqual(len(exercises_for("English", "Past simple")), 2)
-        self.assertEqual(len(exercises_for("Español", "Pretérito imperfecto")), 2)
+        for language, lessons in LESSONS.items():
+            for tense in lessons:
+                self.assertGreaterEqual(len(exercises_for(language, tense)), 4)
+
+    def test_large_bilingual_exercise_bank(self) -> None:
+        self.assertGreaterEqual(len(EXERCISES), 80)
+
+
+class LearningContentTests(unittest.TestCase):
+    def test_irregular_directories_are_substantial(self) -> None:
+        self.assertGreaterEqual(len(irregulars_for("English")), 70)
+        self.assertGreaterEqual(len(irregulars_for("Español")), 30)
+
+    def test_vocabulary_covers_humanitarian_and_daily_life(self) -> None:
+        self.assertGreaterEqual(len(VOCABULARY), 80)
+        humanitarian = vocabulary_for("Español", ["Humanitarian aid"])
+        daily = vocabulary_for("English", ["Travel", "Home"])
+        self.assertGreaterEqual(len(humanitarian), 10)
+        self.assertGreaterEqual(len(daily), 20)
 
 
 if __name__ == "__main__":
