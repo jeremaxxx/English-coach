@@ -48,8 +48,24 @@ virtuels, caches, fichiers `.env` et secrets Streamlit sont exclus par
 7. Cliquer sur **Deploy**.
 
 Streamlit installe automatiquement la version indiquée dans `requirements.txt`,
-charge `exercises.json`, puis démarre l'application. Aucun secret n'est requis
-pour cette version.
+charge les contenus pédagogiques, puis démarre l'application. Aucun secret
+n'est requis pour les exercices locaux.
+
+### Activer facultativement l'évaluation C1 par IA
+
+Dans les paramètres de l'application Streamlit, ouvrir **Secrets** et ajouter :
+
+```toml
+OPENAI_API_KEY = "votre-clé-de-projet"
+OPENAI_MODEL = "gpt-5.6-luna"
+OPENAI_ALLOWED_EMAILS = ["vous@example.com", "partenaire@example.com"]
+OPENAI_MAX_CALLS_PER_SESSION = 10
+```
+
+La clé reste côté serveur et ne doit jamais être ajoutée à GitHub. L'API est
+facturée séparément de tout abonnement ChatGPT. Configurez aussi un budget et
+des limites d'usage sur le projet API. Si aucun secret n'est défini, l'atelier
+C1 utilise uniquement son analyse locale.
 
 ## 5. Partager l'application
 

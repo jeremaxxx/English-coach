@@ -1,15 +1,24 @@
 """Interface web locale du coach d'anglais professionnel."""
 
 import json
+import re
+from collections import Counter
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List
 
 import streamlit as st
 
 from coach import Feedback, get_feedback
+from c1_content import ADVANCED_GRAMMAR, WRITING_PROMPTS, advanced_exercises_for, writing_prompts_for
 from conjugation import LESSON_DETAILS, LESSONS, exercises_for, is_conjugation_correct
 from irregular_verbs import irregulars_for
 from vocabulary import VOCABULARY, vocabulary_for
+from writing_coach import (
+    evaluate_with_openai,
+    local_writing_analysis,
+    progress_export,
+    validate_progress_import,
+)
 
 
 EXERCISES_FILE = Path(__file__).with_name("exercises.json")
@@ -458,6 +467,449 @@ def show_vocabulary() -> None:
         show_vocabulary_quiz(language, categories, direction)
 
 
+def initialise_c1_state() -> None:
+    """Initialise les données privées à la session du navigateur."""
+
+    st.session_state.setdefault("writing_attempts", [])
+    st.session_state.setdefault("error_notebook", [])
+    st.session_state.setdefault("review_cards", [])
+    st.session_state.setdefault("writing_draft", "")
+    st.session_state.setdefault("writing_revision", "")
+    st.session_state.setdefault("writing_local_feedback", None)
+    st.session_state.setdefault("writing_ai_feedback", None)
+    st.session_state.setdefault("writing_prompt_id", "")
+    st.session_state.setdefault("api_calls_this_session", 0)
+
+
+def configured_openai() -> Dict[str, Any]:
+    """Lit les secrets serveur sans échouer quand aucun secret n'existe."""
+
+    try:
+        key = str(st.secrets.get("OPENAI_API_KEY", ""))
+        model = str(st.secrets.get("OPENAI_MODEL", "gpt-5.6-luna"))
+        allowed = [str(email).casefold() for email in st.secrets.get("OPENAI_ALLOWED_EMAILS", [])]
+        max_calls = max(0, min(50, int(st.secrets.get("OPENAI_MAX_CALLS_PER_SESSION", 10))))
+    except Exception:
+        key, model, allowed, max_calls = "", "gpt-5.6-luna", [], 10
+    return {"key": key, "model": model, "allowed": allowed, "max_calls": max_calls}
+
+
+def api_user_is_allowed(api: Dict[str, Any]) -> bool:
+    """Applique l'allowlist côté serveur lorsqu'elle est configurée."""
+
+    if not api["allowed"]:
+        return True
+    try:
+        email = str(st.user.get("email", "")).casefold()
+    except Exception:
+        email = ""
+    return bool(email) and email in api["allowed"]
+
+
+def show_local_writing_feedback(feedback: Dict[str, Any], minimum: int, maximum: int) -> None:
+    """Présente les indicateurs vérifiables calculés sans IA."""
+
+    cols = st.columns(4)
+    cols[0].metric("Words", "{0}/{1}–{2}".format(feedback["word_count"], minimum, maximum))
+    cols[1].metric("Paragraphs", feedback["paragraph_count"])
+    cols[2].metric("Sentences", feedback["sentence_count"])
+    cols[3].metric("Lexical variety", "{0}%".format(feedback["lexical_diversity"]))
+    for label, passed in feedback["checks"].items():
+        st.write(":material/check_circle: {0}".format(label) if passed else ":material/warning: {0}".format(label))
+    if feedback["repeated_words"]:
+        st.warning("Repeated content words: {0}".format(", ".join(feedback["repeated_words"])))
+    st.caption("This local analysis measures form only; it does not judge meaning or grammatical accuracy.")
+
+
+def show_ai_writing_feedback(feedback: Dict[str, Any]) -> None:
+    """Affiche la grille C1 structurée reçue de l'API."""
+
+    st.subheader("C1 diagnostic")
+    labels = {
+        "task_achievement": "Task", "organisation": "Organisation", "grammar": "Grammar",
+        "vocabulary": "Vocabulary", "register": "Register",
+    }
+    score_cols = st.columns(5)
+    for column, (key, label) in zip(score_cols, labels.items()):
+        column.metric(label, "{0}/5".format(feedback["scores"][key]))
+    st.write(feedback["summary"])
+    left, right = st.columns(2)
+    with left.container(border=True, height="stretch"):
+        st.markdown("#### Strengths")
+        for strength in feedback["strengths"]:
+            st.markdown("- {0}".format(strength))
+    with right.container(border=True, height="stretch"):
+        st.markdown("#### Priorities")
+        for priority in feedback["priorities"]:
+            st.markdown("- {0}".format(priority))
+    if feedback["corrections"]:
+        st.markdown("#### Corrections to study")
+        for correction in feedback["corrections"]:
+            with st.expander(correction["category"] + " · " + correction["original"][:60]):
+                st.write("**Original:** {0}".format(correction["original"]))
+                st.write("**Improved:** {0}".format(correction["improved"]))
+                st.write(correction["explanation"])
+    st.info("Next targeted exercise: {0}".format(feedback["next_exercise"]), icon=":material/target:")
+
+
+def save_writing_attempt(prompt: Dict[str, Any], self_scores: Dict[str, int]) -> None:
+    """Enregistre le travail et transforme les corrections en cartes de révision."""
+
+    ai_feedback = st.session_state.get("writing_ai_feedback")
+    attempt = {
+        "prompt_id": prompt["id"], "title": prompt["title"], "language": prompt["language"],
+        "kind": prompt["kind"], "draft": st.session_state.writing_draft,
+        "revision": st.session_state.writing_revision, "self_scores": self_scores,
+        "ai_scores": ai_feedback.get("scores", {}) if ai_feedback else {},
+    }
+    st.session_state.writing_attempts.append(attempt)
+    if ai_feedback:
+        existing = {(item.get("original"), item.get("improved")) for item in st.session_state.error_notebook}
+        for correction in ai_feedback["corrections"]:
+            pair = (correction["original"], correction["improved"])
+            if pair not in existing:
+                card = {**correction, "box": 1, "reviews": 0}
+                st.session_state.error_notebook.append(card)
+                st.session_state.review_cards.append(card.copy())
+
+
+def show_writing_lab() -> None:
+    """Guide une production, son évaluation et sa réécriture."""
+
+    language = st.sidebar.segmented_control(
+        "Writing language", ["English", "Español"], default="English", required=True,
+        width="stretch", key="writing_language",
+    )
+    kinds = ["All"] + list(dict.fromkeys(p["kind"] for p in WRITING_PROMPTS if p["language"] == language))
+    kind = st.sidebar.selectbox("Task type", kinds, key="writing_kind")
+    prompts = writing_prompts_for(language, kind)
+    selected_title = st.selectbox("Choose a task", [p["title"] for p in prompts], key="writing_prompt_title")
+    prompt = next(p for p in prompts if p["title"] == selected_title)
+    if st.session_state.writing_prompt_id != prompt["id"]:
+        st.session_state.writing_prompt_id = prompt["id"]
+        st.session_state.writing_draft = ""
+        st.session_state.writing_revision = ""
+        st.session_state.writing_local_feedback = None
+        st.session_state.writing_ai_feedback = None
+        st.session_state.writing_saved = False
+
+    with st.container(border=True):
+        st.caption("{0} · {1}–{2} words".format(prompt["kind"], prompt["min_words"], prompt["max_words"]))
+        st.subheader(prompt["title"])
+        st.write(prompt["scenario"])
+        for instruction in prompt["instructions"]:
+            st.markdown("- {0}".format(instruction))
+        st.caption("Focus: {0}".format(" · ".join(prompt["focus"])))
+
+    with st.form("writing_draft_form"):
+        draft = st.text_area(
+            "First draft", value=st.session_state.writing_draft, height=300,
+            placeholder="Write independently before requesting feedback…",
+            key="writing_draft_" + prompt["id"],
+        )
+        submitted = st.form_submit_button("Analyse my draft", type="primary", width="stretch")
+    if submitted:
+        if len(draft.strip()) < 40:
+            st.error("Write a more substantial draft before requesting analysis.")
+        else:
+            st.session_state.writing_draft = draft
+            st.session_state.writing_local_feedback = local_writing_analysis(
+                draft, prompt["min_words"], prompt["max_words"]
+            )
+            st.session_state.writing_revision = draft
+            st.rerun()
+
+    if not st.session_state.writing_local_feedback:
+        return
+    st.divider()
+    st.subheader("Immediate local feedback")
+    show_local_writing_feedback(
+        st.session_state.writing_local_feedback, prompt["min_words"], prompt["max_words"]
+    )
+
+    api = configured_openai()
+    if api["key"] and api_user_is_allowed(api):
+        with st.container(border=True):
+            st.markdown("#### Optional AI evaluation")
+            st.caption(
+                "Your draft will be sent from the Streamlit server to the OpenAI API. "
+                "It is not shown to other app users. Avoid confidential or personal data."
+            )
+            consent = st.checkbox(
+                "I agree to send this draft for evaluation",
+                key="writing_api_consent_" + prompt["id"],
+            )
+            remaining = max(0, api["max_calls"] - st.session_state.api_calls_this_session)
+            st.caption("{0} AI evaluations remaining in this browser session.".format(remaining))
+            if st.button("Request C1 evaluation", disabled=not consent or remaining == 0):
+                with st.spinner("Evaluating the text…"):
+                    try:
+                        st.session_state.writing_ai_feedback = evaluate_with_openai(
+                            api["key"], api["model"], prompt["language"], prompt["scenario"],
+                            prompt["instructions"], st.session_state.writing_draft,
+                        )
+                        st.session_state.api_calls_this_session += 1
+                        st.rerun()
+                    except RuntimeError as error:
+                        st.error(str(error))
+    elif api["key"]:
+        st.warning("AI evaluation is not enabled for your signed-in email address.", icon=":material/lock:")
+    else:
+        st.info(
+            "AI evaluation is disabled. Add OPENAI_API_KEY to Streamlit secrets to enable it; "
+            "the local writing workflow remains fully usable.",
+            icon=":material/lock:",
+        )
+    if st.session_state.writing_ai_feedback:
+        show_ai_writing_feedback(st.session_state.writing_ai_feedback)
+
+    st.divider()
+    st.subheader("Rewrite")
+    st.write("Revise the text using the feedback above. Do not copy the model answer yet.")
+    revision = st.text_area(
+        "Second version", value=st.session_state.writing_revision,
+        height=300, key="writing_revision_widget_" + prompt["id"],
+    )
+    rubric_labels = ["Task achievement", "Organisation", "Grammar", "Vocabulary", "Register"]
+    self_scores = {
+        label: st.slider(
+            label, 1, 5, 3,
+            key="self_{0}_{1}".format(prompt["id"], label.lower().replace(" ", "_")),
+        )
+        for label in rubric_labels
+    }
+    if st.button("Save revision and reveal model", type="primary", width="stretch"):
+        if revision.strip() == st.session_state.writing_draft.strip():
+            st.warning("Make at least one change before saving the revision.")
+        else:
+            st.session_state.writing_revision = revision
+            save_writing_attempt(prompt, self_scores)
+            st.session_state.writing_saved = True
+            st.rerun()
+    if st.session_state.get("writing_saved"):
+        st.success("Revision saved. Compare structure and choices—not exact wording.")
+        with st.expander("Model C1 answer", expanded=True, icon=":material/menu_book:"):
+            st.write(prompt["model_answer"])
+
+
+def reset_advanced_grammar(language: str) -> None:
+    st.session_state.advanced_language = language
+    st.session_state.advanced_index = 0
+    st.session_state.advanced_score = 0
+    st.session_state.advanced_answered = False
+
+
+def show_advanced_grammar() -> None:
+    """Entraîne les structures qui distinguent souvent B2 et C1."""
+
+    language = st.sidebar.segmented_control(
+        "Language", ["English", "Español"], default="English", required=True,
+        width="stretch", key="advanced_grammar_language",
+    )
+    exercises = advanced_exercises_for(language)
+    if st.session_state.get("advanced_language") != language:
+        reset_advanced_grammar(language)
+    index = st.session_state.advanced_index
+    if index >= len(exercises):
+        st.success("Series complete: {0}/{1}.".format(st.session_state.advanced_score, len(exercises)))
+        if st.button("Practise again", type="primary"):
+            reset_advanced_grammar(language)
+            st.rerun()
+        return
+    exercise = exercises[index]
+    st.progress(index / len(exercises), text="{0} of {1}".format(index + 1, len(exercises)))
+    with st.container(border=True):
+        st.caption(exercise["topic"])
+        st.subheader(exercise["prompt"])
+    if not st.session_state.advanced_answered:
+        with st.form("advanced_grammar_form"):
+            answer = st.text_input("Your answer")
+            submit = st.form_submit_button("Check", type="primary", width="stretch")
+        if submit:
+            correct = is_conjugation_correct(answer, exercise["answers"])
+            st.session_state.advanced_answered = True
+            st.session_state.advanced_correct = correct
+            if correct:
+                st.session_state.advanced_score += 1
+            st.rerun()
+    else:
+        if st.session_state.advanced_correct:
+            st.success("Correct!")
+        else:
+            st.error("Suggested answer: **{0}**".format(exercise["answers"][0]))
+        st.write(exercise["explanation"])
+        if st.button("Next", type="primary", width="stretch", key="advanced_next"):
+            st.session_state.advanced_index += 1
+            st.session_state.advanced_answered = False
+            st.rerun()
+
+
+def show_error_notebook() -> None:
+    """Affiche, enrichit et révise le carnet d'erreurs personnel."""
+
+    with st.form("manual_error_form"):
+        st.markdown("#### Add an error manually")
+        category = st.selectbox("Category", ["Grammar", "Vocabulary", "Register", "Cohesion", "Spelling"])
+        original = st.text_input("Original wording")
+        improved = st.text_input("Corrected wording")
+        explanation = st.text_input("Rule or explanation")
+        add = st.form_submit_button("Add to notebook")
+    if add and original.strip() and improved.strip():
+        item = {"category": category, "original": original, "improved": improved,
+                "explanation": explanation, "box": 1, "reviews": 0}
+        st.session_state.error_notebook.append(item)
+        st.session_state.review_cards.append(item.copy())
+        st.rerun()
+
+    if not st.session_state.error_notebook:
+        st.info("Your errors will appear here after an AI evaluation or manual entry.")
+        return
+    st.dataframe(st.session_state.error_notebook, hide_index=True, width="stretch")
+    cards = st.session_state.review_cards
+    if not cards:
+        return
+    card_index = st.session_state.get("review_index", 0) % len(cards)
+    card = cards[card_index]
+    st.subheader("Spaced review")
+    with st.container(border=True):
+        st.caption(card.get("category", "Review"))
+        st.write("Improve this: **{0}**".format(card["original"]))
+        reveal = st.toggle("Reveal correction", key="review_reveal")
+        if reveal:
+            st.success(card["improved"])
+            st.write(card.get("explanation", ""))
+    if reveal:
+        with st.container(horizontal=True):
+            if st.button("Again", key="review_again"):
+                card["box"] = 1
+                card["reviews"] = card.get("reviews", 0) + 1
+                st.session_state.review_index = card_index + 1
+                st.rerun()
+            if st.button("Hard", key="review_hard"):
+                card["box"] = max(1, int(card.get("box", 1)))
+                card["reviews"] = card.get("reviews", 0) + 1
+                st.session_state.review_index = card_index + 1
+                st.rerun()
+            if st.button("Good", type="primary", key="review_good"):
+                card["box"] = min(5, int(card.get("box", 1)) + 1)
+                card["reviews"] = card.get("reviews", 0) + 1
+                st.session_state.review_index = card_index + 1
+                st.rerun()
+
+
+def show_c1_progress() -> None:
+    """Présente la progression et permet un export/import local."""
+
+    attempts = st.session_state.writing_attempts
+    errors = st.session_state.error_notebook
+    reviewed = sum(int(card.get("reviews", 0)) for card in st.session_state.review_cards)
+    cols = st.columns(3)
+    cols[0].metric("Writing tasks", len(attempts))
+    cols[1].metric("Errors collected", len(errors))
+    cols[2].metric("Card reviews", reviewed)
+    if attempts:
+        score_totals: Dict[str, List[int]] = {}
+        for attempt in attempts:
+            source = attempt.get("ai_scores") or {
+                key.lower().replace(" ", "_"): value
+                for key, value in attempt.get("self_scores", {}).items()
+            }
+            for key, value in source.items():
+                score_totals.setdefault(key, []).append(int(value))
+        averages = {
+            key: sum(values) / len(values) for key, values in score_totals.items() if values
+        }
+        if averages:
+            weakest = min(averages, key=averages.get)
+            recommendations = {
+                "task_achievement": "Choose a synthesis or report and check every instruction before writing.",
+                "organisation": "Practise paragraph plans and advanced linking language.",
+                "grammar": "Complete the Advanced grammar series, then rewrite one previous text.",
+                "vocabulary": "Review collocations and replace repeated general verbs with precise alternatives.",
+                "register": "Choose a professional email or B2-to-C1 reformulation task.",
+            }
+            st.info(
+                "Adaptive recommendation · weakest area: **{0}** ({1:.1f}/5). {2}".format(
+                    weakest.replace("_", " "), averages[weakest], recommendations.get(weakest, "Review this area in your next task.")
+                ),
+                icon=":material/route:",
+            )
+        st.dataframe([
+            {"Task": item["title"], "Language": item["language"], "Type": item["kind"],
+             "Self score": sum(item["self_scores"].values()),
+             "AI score": sum(item.get("ai_scores", {}).values()) or None}
+            for item in attempts
+        ], hide_index=True, width="stretch")
+    st.download_button(
+        "Download my private progress", progress_export(dict(st.session_state)),
+        file_name="language-coach-progress.json", mime="application/json",
+        icon=":material/download:",
+    )
+    uploaded = st.file_uploader("Restore a progress file", type=["json"], key="progress_upload")
+    if uploaded and st.button("Restore progress"):
+        try:
+            imported = validate_progress_import(json.loads(uploaded.getvalue().decode("utf-8")))
+            for key, value in imported.items():
+                st.session_state[key] = value
+            st.success("Progress restored.")
+            st.rerun()
+        except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            st.error("Invalid progress file: {0}".format(error))
+
+
+DOCUMENT_STOPWORDS = {
+    "about", "after", "again", "avec", "avoir", "comme", "dans", "para", "pero", "porque",
+    "esta", "este", "that", "their", "there", "these", "they", "this", "those", "would",
+    "from", "have", "with", "your", "pour", "plus", "nous", "vous", "elle", "elles", "sont",
+}
+
+
+def show_document_lab() -> None:
+    """Extrait localement des candidats lexicaux de documents non sensibles."""
+
+    st.subheader("Document vocabulary lab")
+    st.write("Upload a `.txt` or `.csv` document. It is processed in memory and is not sent to an AI service.")
+    upload = st.file_uploader("Professional document", type=["txt", "csv"], key="document_upload")
+    if not upload:
+        return
+    try:
+        text = upload.getvalue().decode("utf-8")
+    except UnicodeDecodeError:
+        st.error("The document must use UTF-8 encoding.")
+        return
+    tokens = [
+        token.casefold() for token in re.findall(r"[^\W\d_]{5,}", text, re.UNICODE)
+        if token.casefold() not in DOCUMENT_STOPWORDS
+    ]
+    rows = [{"Candidate term": word, "Occurrences": count}
+            for word, count in Counter(tokens).most_common(60)]
+    st.dataframe(rows, hide_index=True, width="stretch")
+    st.caption("Review these candidates manually before adding them to the learning corpus.")
+
+
+def show_c1_workshop() -> None:
+    """Point d'entrée du parcours d'écrit C1."""
+
+    initialise_c1_state()
+    st.title("C1 writing workshop")
+    st.caption("Write, receive evidence-based feedback, rewrite, and review your recurring errors.")
+    section = st.segmented_control(
+        "C1 workspace",
+        ["Writing lab", "Advanced grammar", "Error notebook", "Progress", "Documents"],
+        default="Writing lab", required=True, width="stretch", wrap=True, key="c1_section",
+    )
+    if section == "Writing lab":
+        show_writing_lab()
+    elif section == "Advanced grammar":
+        show_advanced_grammar()
+    elif section == "Error notebook":
+        show_error_notebook()
+    elif section == "Progress":
+        show_c1_progress()
+    else:
+        show_document_lab()
+
+
 def main() -> None:
     """Construit et exécute l'application Streamlit."""
 
@@ -475,12 +927,14 @@ def main() -> None:
         unsafe_allow_html=True,
     )
     mode = st.sidebar.segmented_control(
-        "Practice area", ["Conjugation", "Irregular verbs", "Vocabulary", "Professional English"],
-        default="Conjugation", required=True, width="stretch", key="practice_area",
+        "Practice area", ["C1 Writing", "Conjugation", "Irregular verbs", "Vocabulary", "Professional English"],
+        default="C1 Writing", required=True, width="stretch", key="practice_area",
         wrap=True,
     )
     st.sidebar.divider()
-    if mode == "Conjugation":
+    if mode == "C1 Writing":
+        show_c1_workshop()
+    elif mode == "Conjugation":
         show_conjugation()
     elif mode == "Irregular verbs":
         show_irregular_verbs()

@@ -1,11 +1,14 @@
 """Tests unitaires du moteur de correction."""
 
 import unittest
+from unittest.mock import patch
 
+from c1_content import ADVANCED_GRAMMAR, WRITING_PROMPTS, advanced_exercises_for
 from coach import get_feedback, normalize_answer
 from conjugation import EXERCISES, LESSONS, exercises_for, is_conjugation_correct, normalize_conjugation_answer
 from irregular_verbs import irregulars_for
 from vocabulary import VOCABULARY, vocabulary_for
+from writing_coach import evaluate_with_openai, local_writing_analysis, progress_export, validate_progress_import
 
 
 class NormalizeAnswerTests(unittest.TestCase):
@@ -71,6 +74,68 @@ class LearningContentTests(unittest.TestCase):
         daily = vocabulary_for("English", ["Travel", "Home"])
         self.assertGreaterEqual(len(humanitarian), 10)
         self.assertGreaterEqual(len(daily), 20)
+
+    def test_c1_content_covers_both_languages(self) -> None:
+        self.assertGreaterEqual(len(WRITING_PROMPTS), 12)
+        self.assertTrue(any(prompt["language"] == "English" for prompt in WRITING_PROMPTS))
+        self.assertTrue(any(prompt["language"] == "Español" for prompt in WRITING_PROMPTS))
+        self.assertGreaterEqual(len(ADVANCED_GRAMMAR), 20)
+        self.assertTrue(advanced_exercises_for("English"))
+        self.assertTrue(advanced_exercises_for("Español"))
+
+
+class WritingCoachTests(unittest.TestCase):
+    def test_local_analysis_reports_objective_features(self) -> None:
+        text = (
+            "Although the proposal appears reasonable, it may create delays.\n\n"
+            "However, a limited pilot would provide stronger evidence.\n\n"
+            "Therefore, we recommend testing it before wider implementation."
+        )
+        analysis = local_writing_analysis(text, 20, 80)
+        self.assertTrue(analysis["checks"]["Length within target"])
+        self.assertTrue(analysis["checks"]["At least 3 paragraphs"])
+        self.assertTrue(analysis["connectors"])
+        self.assertTrue(analysis["hedges"])
+
+    def test_progress_round_trip(self) -> None:
+        state = {"writing_attempts": [{"title": "Test"}], "error_notebook": [], "review_cards": []}
+        restored = validate_progress_import(__import__("json").loads(progress_export(state)))
+        self.assertEqual(restored["writing_attempts"][0]["title"], "Test")
+
+    def test_progress_rejects_unknown_version(self) -> None:
+        with self.assertRaises(ValueError):
+            validate_progress_import({"version": 99})
+
+    @patch("writing_coach.urllib.request.urlopen")
+    def test_api_request_disables_storage_and_parses_feedback(self, mock_urlopen) -> None:
+        feedback = {
+            "summary": "Clear text.",
+            "scores": {"task_achievement": 4, "organisation": 4, "grammar": 4,
+                       "vocabulary": 3, "register": 4},
+            "strengths": ["Clear structure", "Appropriate tone"],
+            "priorities": ["Use richer collocations", "Vary sentence openings"],
+            "corrections": [], "next_exercise": "Rewrite one paragraph.",
+        }
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                payload = {"output": [{"type": "message", "content": [
+                    {"type": "output_text", "text": __import__("json").dumps(feedback)}
+                ]}]}
+                return __import__("json").dumps(payload).encode()
+
+        mock_urlopen.return_value = FakeResponse()
+        result = evaluate_with_openai("secret-test-key", "gpt-5.6-luna", "English", "Task", ["Be clear"], "Draft")
+        request = mock_urlopen.call_args.args[0]
+        sent = __import__("json").loads(request.data.decode())
+        self.assertFalse(sent["store"])
+        self.assertEqual(result["scores"]["grammar"], 4)
 
 
 if __name__ == "__main__":

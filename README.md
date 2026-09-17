@@ -1,7 +1,7 @@
 # English Coach
 
 Application web pour pratiquer l'anglais professionnel, l'anglais général et
-l'espagnol. Elle réunit quatre espaces pédagogiques :
+l'espagnol. Elle réunit plusieurs espaces pédagogiques :
 
 - 20 fiches de conjugaison anglaise et espagnole, avec plus de 80 exercices ;
 - un répertoire de plus de 100 verbes irréguliers et un quiz de mémorisation ;
@@ -9,8 +9,38 @@ l'espagnol. Elle réunit quatre espaces pédagogiques :
   vie quotidienne, consultables ou utilisables en quiz ;
 - 30 exercices historiques d'anglais professionnel de niveau B2.
 
+Elle comprend également un atelier d'écriture C1 : e-mails, rapports,
+propositions, essais, synthèses, traductions et reformulations. Chaque travail
+suit une boucle brouillon → analyse → réécriture → comparaison avec un modèle.
+Un carnet d'erreurs, des cartes de révision, des exercices de grammaire avancée
+et un export JSON privé permettent de suivre la progression.
+
 Aucune API d'intelligence artificielle n'est appelée : le contenu et la
-correction fonctionnent localement.
+correction fermée fonctionnent localement. L'évaluation IA des productions
+libres est facultative et reste désactivée tant qu'aucune clé API n'est ajoutée
+aux secrets Streamlit.
+
+## Évaluation IA facultative
+
+L'abonnement ChatGPT et l'API OpenAI sont deux produits facturés séparément.
+Après avoir activé la facturation API, ajouter dans les secrets du déploiement :
+
+```toml
+OPENAI_API_KEY = "votre-clé-de-projet"
+OPENAI_MODEL = "gpt-5.6-luna"
+OPENAI_ALLOWED_EMAILS = ["vous@example.com", "partenaire@example.com"]
+OPENAI_MAX_CALLS_PER_SESSION = 10
+```
+
+Ne jamais placer une vraie clé dans le dépôt. L'application lit la clé côté
+serveur, impose un consentement avant chaque envoi et utilise `store=false`.
+Les textes ne sont pas écrits dans les journaux de l'application. Une liste
+d'adresses autorisées et un maximum d'évaluations par session peuvent être
+configurés ; il faut également définir un budget et des limites dans le projet
+API OpenAI, seule protection globale contre la multiplication des sessions.
+
+Sans clé, l'analyse locale, la réécriture, les modèles C1, la grammaire, le
+vocabulaire et tous les quiz restent disponibles.
 
 ## Prérequis
 
@@ -53,6 +83,8 @@ python -m unittest discover -s tests -v
 - `conjugation.py` : cours, exercices et correction de conjugaison bilingues ;
 - `irregular_verbs.py` : formes essentielles des verbes irréguliers ;
 - `vocabulary.py` : lexique trilingue professionnel, humanitaire et quotidien ;
+- `c1_content.py` : sujets d'écriture, modèles et grammaire avancée C1 ;
+- `writing_coach.py` : analyse locale, appel API facultatif et export de progression ;
 - `exercises.json` : 30 exercices d'anglais professionnel ;
 - `tests/test_coach.py` : tests unitaires du moteur de correction ;
 - `.streamlit/config.toml` : couleurs et configuration locale de l'interface ;
